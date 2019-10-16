@@ -9,7 +9,7 @@ WARNINGS:
 
 1.  This will copy `n` bytes from the input.
 2.  If there are `n` items in the `Bytes` value, this will run the provided `Decoder` O(n log n) times!
-3.  If the input is `n` bytes long then the coder will be run at most `n` times. This is ok for non-pathological parsers.
+3.  If the input is `n` bytes long then the decoder will be run at most `n` times. This is ok for non-pathological parsers.
 
 Example:
 

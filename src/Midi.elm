@@ -1,4 +1,4 @@
-module Midi exposing (Division(..), Event(..), File, Format(..), Header, Track, decoder, divisionToString, formatToString, viewEvent)
+module Midi exposing (Division(..), Event(..), File, Format(..), Header, MidiEvent(..), Track, decoder, divisionToString, formatToString, viewEvent)
 
 import Bitwise
 import Bytes exposing (Endianness(..))
@@ -180,9 +180,10 @@ type MidiEvent
 
 
 type MetaEvent
-    = CopyrightNotice { value : String }
-    | TrackName { value : String }
-    | InstrumentName { value : String }
+    = TextEvent String
+    | CopyrightNotice String
+    | TrackName String
+    | InstrumentName String
     | SetTempo { microsecondsPerQuarterNote : Int }
     | TimeSignature
         { numerator : Int
@@ -213,7 +214,6 @@ type SysexEvent
         , data : List String
         , checksum : String
         }
-    | UnknownSysexEvent (List String)
     | NonRealTimeSysexEvent
         { deviceId : DeviceId
         , subID1 : String
@@ -226,6 +226,7 @@ type SysexEvent
         , subID2 : String
         , data : List String
         }
+    | UnknownSysexEvent (List String)
 
 
 viewEvent : Event -> Html msg
@@ -259,13 +260,16 @@ viewEvent event =
         MidiEvent (ControllerChange { channel, controller, value }) ->
             view "Controller change" [ int "channel" channel, int "controller" controller, int "value" value ]
 
-        MetaEvent (CopyrightNotice { value }) ->
+        MetaEvent (TextEvent value) ->
+            view "TextEvent" [ string "value" value ]
+
+        MetaEvent (CopyrightNotice value) ->
             view "CopyrightNotice" [ string "value" value ]
 
-        MetaEvent (TrackName { value }) ->
+        MetaEvent (TrackName value) ->
             view "TrackName" [ string "value" value ]
 
-        MetaEvent (InstrumentName { value }) ->
+        MetaEvent (InstrumentName value) ->
             view "InstrumentName" [ string "value" value ]
 
         MetaEvent (SetTempo { microsecondsPerQuarterNote }) ->
@@ -461,11 +465,19 @@ eventDecoder =
                         (\k v ->
                             { value =
                                 MidiEvent <|
-                                    NoteOn
-                                        { channel = n
-                                        , key = k
-                                        , velocity = v
-                                        }
+                                    if v == 0 then
+                                        NoteOff
+                                            { channel = n
+                                            , key = k
+                                            , velocity = 40
+                                            }
+
+                                    else
+                                        NoteOn
+                                            { channel = n
+                                            , key = k
+                                            , velocity = v
+                                            }
                             , length = 2
                             }
                         )
@@ -545,71 +557,71 @@ bEventDecoder n =
 
 metaEventDecoder : Decoder { value : Event, length : Int }
 metaEventDecoder =
+    let
+        metaEvent type_ data =
+            case ( type_, data.value ) of
+                ( 0x01, _ ) ->
+                    TextEvent <| String.fromList <| List.map Char.fromCode data.value
+
+                ( 0x02, _ ) ->
+                    CopyrightNotice <| String.fromList <| List.map Char.fromCode data.value
+
+                ( 0x03, _ ) ->
+                    TrackName <| String.fromList <| List.map Char.fromCode data.value
+
+                ( 0x04, _ ) ->
+                    InstrumentName <| String.fromList <| List.map Char.fromCode data.value
+
+                ( 0x51, [ t1, t2, t3 ] ) ->
+                    SetTempo
+                        { microsecondsPerQuarterNote = t1 * 256 * 256 + t2 * 256 + t3
+                        }
+
+                ( 0x58, [ nn, dd, cc, bb ] ) ->
+                    TimeSignature
+                        { numerator = nn
+                        , denominatorPower = dd
+                        , midiClocksPerMetronomeTick = cc
+                        , num32thPer24MidiClocks = bb
+                        }
+
+                ( 0x59, [ sf, mi ] ) ->
+                    KeySignature
+                        { sharpsOrFlats =
+                            if sf > 0 then
+                                KeySharps sf
+
+                            else if sf == 0 then
+                                KeyC
+
+                            else
+                                KeyFlats -sf
+                        , majorOrMinor =
+                            if mi == 0 then
+                                Major
+
+                            else
+                                Minor
+                        }
+
+                ( 0x2F, [] ) ->
+                    EndOfTrack
+
+                _ ->
+                    UnknownMetaEvent
+                        { type_ = toHex type_
+                        , data = List.map toHex data.value
+                        }
+    in
     Decode.map2
         (\type_ data ->
             log "metaEventDecoder" <|
-                { value =
-                    MetaEvent <|
-                        case ( type_, data.value ) of
-                            ( 0x02, _ ) ->
-                                CopyrightNotice { value = String.fromList <| List.map Char.fromCode data.value }
-
-                            ( 0x03, _ ) ->
-                                TrackName { value = String.fromList <| List.map Char.fromCode data.value }
-
-                            ( 0x04, _ ) ->
-                                InstrumentName { value = String.fromList <| List.map Char.fromCode data.value }
-
-                            ( 0x51, [ t1, t2, t3 ] ) ->
-                                SetTempo
-                                    { microsecondsPerQuarterNote = t1 * 256 * 256 + t2 * 256 + t3
-                                    }
-
-                            ( 0x58, [ nn, dd, cc, bb ] ) ->
-                                TimeSignature
-                                    { numerator = nn
-                                    , denominatorPower = dd
-                                    , midiClocksPerMetronomeTick = cc
-                                    , num32thPer24MidiClocks = bb
-                                    }
-
-                            ( 0x59, [ sf, mi ] ) ->
-                                KeySignature
-                                    { sharpsOrFlats =
-                                        if sf > 0 then
-                                            KeySharps sf
-
-                                        else if sf == 0 then
-                                            KeyC
-
-                                        else
-                                            KeyFlats -sf
-                                    , majorOrMinor =
-                                        if mi == 0 then
-                                            Major
-
-                                        else
-                                            Minor
-                                    }
-
-                            ( 0x2F, [] ) ->
-                                EndOfTrack
-
-                            _ ->
-                                UnknownMetaEvent
-                                    { type_ = toHex type_
-                                    , data = List.map toHex data.value
-                                    }
+                { value = MetaEvent <| metaEvent type_ data
                 , length = data.length + 1
                 }
         )
         Decode.unsignedInt8
         variableLengthData
-
-
-dropRight : Int -> List a -> List a
-dropRight n =
-    List.reverse >> List.drop n >> List.reverse
 
 
 sysexEventDecoder : { prependF0 : Bool } -> Decoder { value : Event, length : Int }

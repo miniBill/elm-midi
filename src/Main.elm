@@ -1,6 +1,7 @@
-module Main exposing (main)
+port module Main exposing (main)
 
 import Browser
+import Browser.Events as Browser
 import Bytes exposing (Bytes, Endianness(..))
 import Bytes.Decode as Decode
 import File exposing (File)
@@ -8,14 +9,57 @@ import File.Select as Select
 import Html exposing (Attribute, Html, text)
 import Html.Events as Html
 import Json.Decode as D
-import Midi
+import List.Extra as List
+import Midi exposing (Event(..), MidiEvent(..))
 import Task
+
+
+port play : { freq : Float, on : Bool } -> Cmd msg
+
+
+port stop : () -> Cmd msg
 
 
 type alias Model =
     { hover : Bool
     , files : Files
+    , playing :
+        Maybe
+            { elapsed : Float
+            , queued :
+                List
+                    { time : Int
+                    , on : Bool
+                    , key : Int
+                    }
+            }
     }
+
+
+type alias Note =
+    { name : NoteName
+    , octave : Int
+    , accidental : Accidental
+    }
+
+
+type NoteName
+    = C
+    | D
+    | E
+    | F
+    | G
+    | A
+    | B
+
+
+type Accidental
+    = DoubleSharp
+    | Sharp
+    | Natural
+    | None
+    | Flat
+    | DoubleFlat
 
 
 type Files
@@ -30,12 +74,16 @@ type Msg
     | DragLeave
     | GotFiles File (List File)
     | GotBytes (List Bytes)
+    | Play Midi.File
+    | Stop
+    | Tick Float
 
 
 init : flags -> ( Model, Cmd Msg )
 init _ =
     ( { hover = False
       , files = Waiting
+      , playing = Nothing
       }
     , Cmd.none
     )
@@ -44,6 +92,24 @@ init _ =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        Play midi ->
+            let
+                { queued } =
+                    midiToNoteList midi
+            in
+            ( { model
+                | playing =
+                    Just
+                        { elapsed = 0
+                        , queued = queued
+                        }
+              }
+            , Cmd.none
+            )
+
+        Stop ->
+            ( { model | playing = Nothing }, stop () )
+
         Pick ->
             ( model
             , Select.files [ "audio/midi" ] GotFiles
@@ -71,6 +137,83 @@ update msg model =
             , Cmd.none
             )
 
+        Tick delta ->
+            case model.playing of
+                Nothing ->
+                    ( model, Cmd.none )
+
+                Just ({ elapsed, queued } as playing) ->
+                    let
+                        elapsed_ =
+                            elapsed + delta
+
+                        ( toPlay, toQueue ) =
+                            List.break (\{ time } -> toFloat time > elapsed_) queued
+                    in
+                    ( { model
+                        | playing =
+                            Just { playing | elapsed = elapsed_, queued = toQueue }
+                      }
+                    , Cmd.batch <|
+                        List.map
+                            (\{ key, on } ->
+                                play
+                                    { freq = keyToFreq key
+                                    , on = on
+                                    }
+                            )
+                            toPlay
+                    )
+
+
+keyToFreq key =
+    let
+        a440 =
+            0x3C + 9
+
+        delta =
+            toFloat key - a440
+    in
+    440.0 * 2 ^ (delta / 12)
+
+
+midiToNoteList : Midi.File -> { queued : List { time : Int, key : Int, on : Bool } }
+midiToNoteList midi =
+    let
+        trackToNoteList track =
+            track
+                |> List.foldl
+                    (\{ deltaTime, event } ( time, acc ) ->
+                        ( time + deltaTime
+                        , case event of
+                            MidiEvent midiEvent ->
+                                case midiEvent of
+                                    NoteOn { key } ->
+                                        { time = time + deltaTime
+                                        , key = key
+                                        , on = True
+                                        }
+                                            :: acc
+
+                                    NoteOff { key } ->
+                                        { time = time + deltaTime
+                                        , key = key
+                                        , on = False
+                                        }
+                                            :: acc
+
+                                    _ ->
+                                        acc
+
+                            _ ->
+                                acc
+                        )
+                    )
+                    ( 0, [] )
+                |> (\( _, notes ) -> List.reverse notes)
+    in
+    { queued = List.concatMap trackToNoteList midi.tracks }
+
 
 view : Model -> Html Msg
 view model =
@@ -91,7 +234,7 @@ view model =
                 Html.text "Loading..."
 
             Loaded bytes ->
-                Html.div [] <| List.map viewFile bytes
+                Html.div [] <| List.map (viewFile model.playing) bytes
         ]
 
 
@@ -110,18 +253,18 @@ hijack msg =
     ( msg, True )
 
 
-viewFile : Bytes -> Html msg
-viewFile file =
+viewFile : Maybe a -> Bytes -> Html Msg
+viewFile playing file =
     case Decode.decode Midi.decoder file of
         Just midi ->
-            viewMidi midi
+            viewMidi playing midi
 
         Nothing ->
             Html.text "Invalid midi file =("
 
 
-viewMidi : Midi.File -> Html msg
-viewMidi { header, tracks } =
+viewMidi : Maybe a -> Midi.File -> Html Msg
+viewMidi playing ({ header, tracks } as file) =
     let
         row l r =
             Html.tr []
@@ -132,7 +275,18 @@ viewMidi { header, tracks } =
     Html.div
         []
     <|
-        [ Html.h1 [] [ Html.text "Header" ]
+        [ Html.h1 [] [ Html.text "Controls" ]
+        , case playing of
+            Just _ ->
+                Html.button
+                    [ Html.onClick <| Stop ]
+                    [ Html.text "Stop" ]
+
+            Nothing ->
+                Html.button
+                    [ Html.onClick <| Play file ]
+                    [ Html.text "Play" ]
+        , Html.h1 [] [ Html.text "Header" ]
         , Html.table []
             [ row "Format" <| Midi.formatToString header.format
             , row "Tracks" <| String.fromInt header.tracks
@@ -167,8 +321,13 @@ viewEvent { deltaTime, event } =
 
 
 subscriptions : Model -> Sub Msg
-subscriptions _ =
-    Sub.none
+subscriptions { playing } =
+    case playing of
+        Nothing ->
+            Sub.none
+
+        Just _ ->
+            Browser.onAnimationFrameDelta Tick
 
 
 main : Program () Model Msg

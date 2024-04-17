@@ -2,7 +2,7 @@
   "devDependencies": {
     "cssnano": "^4.1.10",
     "elm-hot": "^1.1.2",
-    "node-elm-compiler": "^5.0.4"
+    "node-elm-compiler": "^5.0.6"
   },
   "dependencies": {
     "parcel-plugin-inliner": "^1.0.10",
